@@ -44,8 +44,6 @@
 #include "wifi_config.h"
 #include "mqtt_client_config.h"
 #include "device_provisioning.h"
-#include "key_security_check.h"
-#include "app_wifi.h"
 
 /* Middleware libraries */
 #include "cy_retarget_io.h"
@@ -87,6 +85,10 @@
 #define MQTT_CONNECTION_SUCCESS                     (1lu << 5)
 #define MQTT_MSG_RECEIVED                           (1lu << 6)
 #define TIME_DIV_MS                                 (60000u)
+#define APP_SDIO_INTERRUPT_PRIORITY                 (7U)
+#define APP_HOST_WAKE_INTERRUPT_PRIORITY            (2U)
+#define APP_SDIO_FREQUENCY_HZ                       (25000000U)
+#define SDHC_SDIO_64BYTES_BLOCK                     (64U)
 
 /*String that describes the MQTT handle that is being created in order to uniquely identify it*/
 #define MQTT_HANDLE_DESCRIPTOR                       "MQTThandleID"
@@ -130,9 +132,33 @@ uint32_t status_flag;
  * receive operations.
  */
 uint8_t *mqtt_network_buffer = NULL;
+static mtb_hal_sdio_t sdio_instance;
+cy_stc_sd_host_context_t sdhc_host_context;
+static cy_wcm_config_t wcm_config;
 
-/* Output of psa_import_key(); placed in SOCMEM so TF-M can write it directly. */
-CY_SECTION(".cy_socmem_data") psa_key_handle_t key_handle;
+#if (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP)
+
+/* SysPm callback parameter structure for SDHC */
+static cy_stc_syspm_callback_params_t sdcardDSParams =
+{
+    .context   = &sdhc_host_context,
+    .base      = CYBSP_WIFI_SDIO_HW
+};
+
+/* SysPm callback structure for SDHC*/
+static cy_stc_syspm_callback_t sdhcDeepSleepCallbackHandler =
+{
+    .callback           = Cy_SD_Host_DeepSleepCallback,
+    .skipMode           = SYSPM_SKIP_MODE,
+    .type               = CY_SYSPM_DEEPSLEEP,
+    .callbackParams     = &sdcardDSParams,
+    .prevItm            = NULL,
+    .nextItm            = NULL,
+    .order              = SYSPM_CALLBACK_ORDER
+};
+#endif
+
+psa_key_handle_t key_handle;
 
 
 
@@ -236,8 +262,10 @@ static void cleanup(void)
  * Function Name: wifi_connect
  ******************************************************************************
  * Summary:
- *  Connects to the Wi-Fi AP using app_wifi_connect() and sets the
- *  WIFI_CONNECTED bit in status_flag upon success.
+ *  Function that initiates connection to the Wi-Fi Access Point using the
+ *  specified SSID and PASSWORD. The connection is retried a maximum of
+ *  'MAX_WIFI_CONN_RETRIES' times with interval of 'WIFI_CONN_RETRY_INTERVAL_MS'
+ *  milliseconds.
  *
  * Parameters:
  *  void
@@ -249,11 +277,53 @@ static void cleanup(void)
  ******************************************************************************/
 static cy_rslt_t wifi_connect(void)
 {
-    cy_rslt_t result = app_wifi_connect();
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+    cy_wcm_connect_params_t connect_param;
+    cy_wcm_ip_address_t ip_address;
 
-    if (CY_RSLT_SUCCESS == result)
+    /* Check if Wi-Fi connection is already established. */
+    if (!(cy_wcm_is_connected_to_ap()))
     {
-        status_flag |= WIFI_CONNECTED;
+        /* Configure the connection parameters for the Wi-Fi interface. */
+        memset(&connect_param, 0, sizeof(cy_wcm_connect_params_t));
+        memcpy(connect_param.ap_credentials.SSID, WIFI_SSID, sizeof(WIFI_SSID));
+        memcpy(connect_param.ap_credentials.password, WIFI_PASSWORD, sizeof(WIFI_PASSWORD));
+        connect_param.ap_credentials.security = WIFI_SECURITY;
+
+        printf("\nWi-Fi Connecting to '%s'\n", connect_param.ap_credentials.SSID);
+
+        /* Connect to the Wi-Fi AP. */
+        for (uint32_t retry_count = 0; retry_count < MAX_WIFI_CONN_RETRIES; retry_count++)
+        {
+            result = cy_wcm_connect_ap(&connect_param, &ip_address);
+
+            if (CY_RSLT_SUCCESS == result)
+            {
+                printf("\nSuccessfully connected to Wi-Fi network '%s'.\n", connect_param.ap_credentials.SSID);
+
+                /* Set the appropriate bit in the status_flag to denote
+                 * successful Wi-Fi connection, print the assigned IP address.
+                 */
+                status_flag |= WIFI_CONNECTED;
+                if (ip_address.version == CY_WCM_IP_VER_V4)
+                {
+                    printf("IPv4 Address Assigned: %s\n\n", ip4addr_ntoa((const ip4_addr_t *) &ip_address.ip.v4));
+                }
+                else if (ip_address.version == CY_WCM_IP_VER_V6)
+                {
+                    printf("IPv6 Address Assigned: %s\n\n", ip6addr_ntoa((const ip6_addr_t *) &ip_address.ip.v6));
+                }
+                return result;
+            }
+
+            printf("Wi-Fi Connection failed. Error code:0x%0X. Retrying in %d ms. Retries left: %d\n",
+                (int)result, WIFI_CONN_RETRY_INTERVAL_MS, (int)(MAX_WIFI_CONN_RETRIES - retry_count - 1));
+            vTaskDelay(pdMS_TO_TICKS(WIFI_CONN_RETRY_INTERVAL_MS));
+        }
+
+        printf("\nExceeded maximum Wi-Fi connection attempts!\n");
+        printf("Wi-Fi connection failed after retrying for %d mins\n\n",
+            (int)(WIFI_CONN_RETRY_INTERVAL_MS * MAX_WIFI_CONN_RETRIES) / TIME_DIV_MS);
     }
     return result;
 }
@@ -506,6 +576,107 @@ static cy_rslt_t mqtt_connect(void)
 * Function Definitions
 *******************************************************************************/
 
+/*******************************************************************************
+* Function Name: sdio_interrupt_handler
+********************************************************************************
+* Summary:
+* Interrupt handler function for SDIO instance.
+*******************************************************************************/
+static void sdio_interrupt_handler(void)
+{
+    mtb_hal_sdio_process_interrupt(&sdio_instance);
+}
+
+/*******************************************************************************
+* Function Name: host_wake_interrupt_handler
+********************************************************************************
+* Summary:
+* Interrupt handler function for the host wake up input pin.
+*******************************************************************************/
+static void host_wake_interrupt_handler(void)
+{
+    mtb_hal_gpio_process_interrupt(&wcm_config.wifi_host_wake_pin);
+}
+
+/*******************************************************************************
+* Function Name: app_sdio_init
+********************************************************************************
+* Summary:
+* This function configures and initializes the SDIO instance used in
+* communication between the host MCU and the wireless device.
+*******************************************************************************/
+static void app_sdio_init(void)
+{
+    cy_rslt_t result;
+    mtb_hal_sdio_cfg_t sdio_hal_cfg;
+    cy_stc_sysint_t sdio_intr_cfg =
+    {
+        .intrSrc = CYBSP_WIFI_SDIO_IRQ,
+        .intrPriority = APP_SDIO_INTERRUPT_PRIORITY
+    };
+
+    cy_stc_sysint_t host_wake_intr_cfg =
+    {
+            .intrSrc = CYBSP_WIFI_HOST_WAKE_IRQ,
+            .intrPriority = APP_HOST_WAKE_INTERRUPT_PRIORITY
+    };
+
+    /* Initialize the SDIO interrupt and specify the interrupt handler. */
+    cy_en_sysint_status_t interrupt_init_status = Cy_SysInt_Init(&sdio_intr_cfg, sdio_interrupt_handler);
+
+    /* SDIO interrupt initialization failed. Stop program execution. */
+    if(CY_SYSINT_SUCCESS != interrupt_init_status)
+    {
+        handle_app_error();
+    }
+
+    /* Enable NVIC interrupt. */
+    NVIC_EnableIRQ(CYBSP_WIFI_SDIO_IRQ);
+
+    /* Setup SDIO using the HAL object and desired configuration */
+    result = mtb_hal_sdio_setup(&sdio_instance, &CYBSP_WIFI_SDIO_sdio_hal_config, NULL, &sdhc_host_context);
+
+    /* SDIO setup failed. Stop program execution. */
+    if(CY_RSLT_SUCCESS != result)
+    {
+        handle_app_error();
+    }
+
+    /* Initialize and Enable SD HOST */
+    Cy_SD_Host_Enable(CYBSP_WIFI_SDIO_HW);
+    Cy_SD_Host_Init(CYBSP_WIFI_SDIO_HW, CYBSP_WIFI_SDIO_sdio_hal_config.host_config, &sdhc_host_context);
+    Cy_SD_Host_SetHostBusWidth(CYBSP_WIFI_SDIO_HW, CY_SD_HOST_BUS_WIDTH_4_BIT);
+
+    sdio_hal_cfg.frequencyhal_hz = APP_SDIO_FREQUENCY_HZ;
+    sdio_hal_cfg.block_size = SDHC_SDIO_64BYTES_BLOCK;
+
+    /* Configure SDIO */
+    mtb_hal_sdio_configure(&sdio_instance, &sdio_hal_cfg);
+
+#if (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP)
+    /* SDHC SysPm callback registration */
+    Cy_SysPm_RegisterCallback(&sdhcDeepSleepCallbackHandler);
+#endif /* (CY_CFG_PWR_SYS_IDLE_MODE == CY_CFG_PWR_MODE_DEEPSLEEP) */
+
+    /* Setup GPIO using the HAL object for WIFI WL REG ON  */
+    mtb_hal_gpio_setup(&wcm_config.wifi_wl_pin, CYBSP_WIFI_WL_REG_ON_PORT_NUM, CYBSP_WIFI_WL_REG_ON_PIN);
+
+    /* Setup GPIO using the HAL object for WIFI HOST WAKE PIN  */
+    mtb_hal_gpio_setup(&wcm_config.wifi_host_wake_pin, CYBSP_WIFI_HOST_WAKE_PORT_NUM, CYBSP_WIFI_HOST_WAKE_PIN);
+
+    /* Initialize the Host wakeup interrupt and specify the interrupt handler. */
+    cy_en_sysint_status_t interrupt_init_status_host_wake =  Cy_SysInt_Init(&host_wake_intr_cfg, host_wake_interrupt_handler);
+
+    /* Host wake up interrupt initialization failed. Stop program execution. */
+    if(CY_SYSINT_SUCCESS != interrupt_init_status_host_wake)
+    {
+        handle_app_error();
+    }
+
+    /* Enable NVIC interrupt. */
+    NVIC_EnableIRQ(CYBSP_WIFI_HOST_WAKE_IRQ);
+}
+
 /******************************************************************************
  * Function Name: terminate_tasks
  ******************************************************************************
@@ -564,22 +735,31 @@ void mqtt_client_task(void *pvParameters)
     publisher_data_t publisher_q_data;
     bool mqtt_client_status = false;
 
+    app_sdio_init();
+
+    /* Configure the Wi-Fi interface as a Wi-Fi STA (i.e. Client). */
+    wcm_config.interface = CY_WCM_INTERFACE_TYPE_STA;
+    wcm_config.wifi_interface_instance = &sdio_instance;
+
     /* To avoid compiler warnings */
     (void) pvParameters;
 
     /* Create a message queue to communicate with other tasks and callbacks. */
     mqtt_task_q = xQueueCreate(MQTT_TASK_QUEUE_LENGTH, sizeof(mqtt_task_cmd_t));
 
-    /* Initialize SDIO and the Wi-Fi Connection Manager. */
-    if (CY_RSLT_SUCCESS != app_wifi_init())
+    /* Initialize the Wi-Fi Connection Manager and jump to the cleanup block 
+     * upon failure.
+     */
+    if (CY_RSLT_SUCCESS != cy_wcm_init(&wcm_config))
     {
         CY_ASSERT(0);
     }
 
-    /* Set the appropriate bit in the status_flag to denote successful
+    /* Set the appropriate bit in the status_flag to denote successful 
      * WCM initialization.
      */
     status_flag |= WCM_INITIALIZED;
+    printf("\nWi-Fi Connection Manager initialized.\n");
 
     /* Initiate connection to the Wi-Fi AP and cleanup if the operation fails. */
     if (CY_RSLT_SUCCESS == wifi_connect())
@@ -600,16 +780,7 @@ void mqtt_client_task(void *pvParameters)
 #else
             printf("\n[Provisioning] Device certificate loaded from secure storage. Skipping provisioning.\n");
             device_key_id = 0x1; /* Persistent PSA key ID used during provisioning */
-            need_provisioning = false;
-
-#if !defined(CM55_LOCAL_PSA_CRYPTO) || (CM55_LOCAL_PSA_CRYPTO == 0)
-            /* Delete a device key file left in the non-secure ITS namespace
-             * by a CM55_LOCAL_PSA_CRYPTO=1 build */
-            (void)remove_stale_ns_key_file();
-#endif
-
-            /* Validate the stored device key before using it */
-            KEY_SECURITY_CHECK_RUN(device_key_id, false);
+            need_provisioning = false; 
 #endif
             }
 

@@ -24,11 +24,8 @@
 # limitations under the License.
 *******************************************************************************/
 #include "device_provisioning.h"
-#include "key_security_check.h"
-#include "psa_tfm_se_driver.h"
 #include "mqtt_client_config.h"
 #include "psa/protected_storage.h"
-#include "psa/internal_trusted_storage.h"
 #include "core_json.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -37,15 +34,11 @@
 /*******************************************************************************
 * Global Variable Definitions
 *******************************************************************************/
-/* Buffers passed directly to PSA (TF-M) calls are placed in SOCMEM instead of
- * CM55 DTCM so that the CM33 SRF relay and TF-M can access them without
- * relying on DTCM address remapping.
- */
-CY_SECTION(".cy_socmem_data") unsigned char aws_client_key[] = { CLAIM_KEY_DATA };
+unsigned char aws_client_key[] = { CLAIM_KEY_DATA };
 
 const size_t aws_client_key_size = sizeof(aws_client_key);
 
-CY_SECTION(".cy_socmem_data") char device_cert_pem[DEVICE_CERT_PEM_BUF_SIZE];
+char device_cert_pem[DEVICE_CERT_PEM_BUF_SIZE];
 char ownership_token[OWNERSHIP_TOKEN_BUF_SIZE];
 char certificate_id[CERTIFICATE_ID_BUF_SIZE];
 
@@ -54,7 +47,7 @@ volatile bool provisioning_accepted = false;
 volatile bool provisioning_in_progress = false;
 volatile bool register_thing_accepted = false;
 SemaphoreHandle_t register_thing_sem = NULL;
-CY_SECTION(".cy_socmem_data") psa_key_id_t device_key_id = 0;
+psa_key_id_t device_key_id = 0;
 
 /*******************************************************************************
 * Function Name: json_extract_string
@@ -292,75 +285,6 @@ bool handle_provisioning_message(const cy_mqtt_publish_info_t *msg)
     return false; /* Not a provisioning message */
 }
 
-#if PSA_KEYGEN_DEBUG
-/* Output buffers of the debug PSA calls; placed in SOCMEM so TF-M can write
- * them directly (same as key_handle / device_key_id). */
-CY_SECTION(".cy_socmem_data") static psa_key_attributes_t dbg_key_attributes;
-CY_SECTION(".cy_socmem_data") static uint8_t dbg_pub_key[PSA_EXPORT_PUBLIC_KEY_OUTPUT_SIZE(
-    PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1), 256)];
-CY_SECTION(".cy_socmem_data") static uint8_t dbg_priv_key[PSA_EXPORT_KEY_OUTPUT_SIZE(
-    PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1), 256)];
-CY_SECTION(".cy_socmem_data") static size_t dbg_out_len;
-
-/*******************************************************************************
- * Function Name: keygen_debug_dump_key
- ********************************************************************************
- * \brief Reads back the generated key from TF-M and prints its attributes and
- * public key. Also attempts a private key export to confirm that TF-M refuses
- * it (the key has no PSA_KEY_USAGE_EXPORT flag).
- *
- * \param[in] key_id  PSA key identifier of the generated key.
- *
- ******************************************************************************/
-static void keygen_debug_dump_key(psa_key_id_t key_id)
-{
-    psa_status_t status;
-
-    dbg_key_attributes = psa_key_attributes_init();
-    status = psa_get_key_attributes(key_id, &dbg_key_attributes);
-    if (status != PSA_SUCCESS) {
-        KEYGEN_DEBUG_PRINT("psa_get_key_attributes failed: %ld\n", (long)status);
-    } else {
-        KEYGEN_DEBUG_PRINT("Key read back from " PSA_ENGINE_NAME ":\n");
-        KEYGEN_DEBUG_PRINT("  id       : 0x%lx\n", (unsigned long)psa_get_key_id(&dbg_key_attributes));
-        KEYGEN_DEBUG_PRINT("  type     : 0x%04x\n", (unsigned int)psa_get_key_type(&dbg_key_attributes));
-        KEYGEN_DEBUG_PRINT("  bits     : %u\n", (unsigned int)psa_get_key_bits(&dbg_key_attributes));
-        KEYGEN_DEBUG_PRINT("  lifetime : 0x%08lx (persistence 0x%02x, location 0x%06lx)\n",
-            (unsigned long)psa_get_key_lifetime(&dbg_key_attributes),
-            (unsigned int)PSA_KEY_LIFETIME_GET_PERSISTENCE(psa_get_key_lifetime(&dbg_key_attributes)),
-            (unsigned long)PSA_KEY_LIFETIME_GET_LOCATION(psa_get_key_lifetime(&dbg_key_attributes)));
-        KEYGEN_DEBUG_PRINT("  usage    : 0x%08lx\n", (unsigned long)psa_get_key_usage_flags(&dbg_key_attributes));
-        KEYGEN_DEBUG_PRINT("  alg      : 0x%08lx\n", (unsigned long)psa_get_key_algorithm(&dbg_key_attributes));
-    }
-    psa_reset_key_attributes(&dbg_key_attributes);
-
-    /* Public key: uncompressed point 04 || X || Y (65 bytes) */
-    dbg_out_len = 0;
-    status = psa_export_public_key(key_id, dbg_pub_key, sizeof(dbg_pub_key), &dbg_out_len);
-    if (status != PSA_SUCCESS) {
-        KEYGEN_DEBUG_PRINT("psa_export_public_key failed: %ld\n", (long)status);
-    } else {
-        KEYGEN_DEBUG_PRINT("Public key (%u bytes):", (unsigned int)dbg_out_len);
-        for (size_t i = 0; i < dbg_out_len; i++) {
-            printf("%s%02x", (i % 16 == 0) ? "\n[PSA-KEYGEN]   " : "", dbg_pub_key[i]);
-        }
-        printf("\n");
-    }
-
-    /* Private key export must be refused: the key has no EXPORT usage flag */
-    dbg_out_len = 0;
-    status = psa_export_key(key_id, dbg_priv_key, sizeof(dbg_priv_key), &dbg_out_len);
-    if (status == PSA_SUCCESS) {
-        KEYGEN_DEBUG_PRINT("WARNING: private key export was allowed (%u bytes)!\n",
-            (unsigned int)dbg_out_len);
-    } else {
-        KEYGEN_DEBUG_PRINT("Private key export refused by " PSA_ENGINE_NAME " (status %ld) - as expected\n",
-            (long)status);
-    }
-    memset(dbg_priv_key, 0, sizeof(dbg_priv_key));
-}
-#endif /* PSA_KEYGEN_DEBUG */
-
 /*******************************************************************************
  * Function Name: generate_ecc_keypair
  ********************************************************************************
@@ -378,9 +302,6 @@ static psa_status_t generate_ecc_keypair(psa_key_id_t *key_id)
 {
     psa_status_t status;
     psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-#if PSA_KEYGEN_DEBUG
-    TickType_t start_tick;
-#endif
 
     /* Configure key attributes */
     psa_set_key_type(&attributes,
@@ -393,60 +314,18 @@ static psa_status_t generate_ecc_keypair(psa_key_id_t *key_id)
         PSA_ALG_ECDSA(PSA_ALG_ANY_HASH));
 
     /*  make key persistent so it survives reboots */
-     psa_set_key_id(&attributes, DEVICE_KEY_ID);
-#if defined(CM55_TFM_SE_KEY) && (CM55_TFM_SE_KEY == 1)
-     /* Generate and keep the key in TF-M (secure element driver) */
-     psa_set_key_lifetime(&attributes, PSA_TFM_SE_LIFETIME_PERSISTENT);
-#else
+     psa_set_key_id(&attributes, 0x1);
      psa_set_key_lifetime(&attributes, PSA_KEY_LIFETIME_PERSISTENT);
-#endif
-
-    KEYGEN_DEBUG_PRINT("Requested attributes: type 0x%04x, bits %u, usage 0x%08lx, "
-        "alg 0x%08lx, id 0x%lx, lifetime 0x%08lx\n",
-        (unsigned int)psa_get_key_type(&attributes),
-        (unsigned int)psa_get_key_bits(&attributes),
-        (unsigned long)psa_get_key_usage_flags(&attributes),
-        (unsigned long)psa_get_key_algorithm(&attributes),
-        (unsigned long)psa_get_key_id(&attributes),
-        (unsigned long)psa_get_key_lifetime(&attributes));
-
-#if !defined(CM55_LOCAL_PSA_CRYPTO) || (CM55_LOCAL_PSA_CRYPTO == 0)
-    /* Delete a device key file left in the non-secure ITS namespace by a
-     * CM55_LOCAL_PSA_CRYPTO=1 build */
-    (void)remove_stale_ns_key_file();
-#endif
-
-    /* Remember the key being replaced, to check the new one is different */
-    KEY_SECURITY_CHECK_CAPTURE_PREVIOUS(DEVICE_KEY_ID);
 
     /* Destroy any previously stored key with the same ID to avoid PSA_ERROR_ALREADY_EXISTS */
-    status = psa_destroy_key(DEVICE_KEY_ID);
-    KEYGEN_DEBUG_PRINT("psa_destroy_key(0x%lx) -> %ld%s\n", (unsigned long)DEVICE_KEY_ID,
-        (long)status,
-        (status == PSA_ERROR_INVALID_HANDLE) ? " (no previous key)" : "");
+    psa_destroy_key(0x1);
 
     /* Generate the key pair */
-    KEYGEN_DEBUG_PRINT("psa_generate_key: " PSA_ENGINE_PATH "...\n");
-#if PSA_KEYGEN_DEBUG
-    start_tick = xTaskGetTickCount();
-#endif
     status = psa_generate_key(&attributes, key_id);
-#if PSA_KEYGEN_DEBUG
-    KEYGEN_DEBUG_PRINT("psa_generate_key -> %ld, key_id 0x%lx, took %lu ms\n",
-        (long)status, (unsigned long)*key_id,
-        (unsigned long)((xTaskGetTickCount() - start_tick) * portTICK_PERIOD_MS));
-#endif
     if (status != PSA_SUCCESS) {
         printf("Key generation failed: %ld\n", (long)status);
         return status;
     }
-
-#if PSA_KEYGEN_DEBUG
-    (*key_id);
-#endif
-
-    /* Validate the security properties of the new key */
-    KEY_SECURITY_CHECK_RUN(*key_id, true);
 
     return PSA_SUCCESS;
 }
@@ -721,45 +600,6 @@ psa_status_t delete_device_cert_secure(void)
     } 
     return status;
 }
-
-#if !defined(CM55_LOCAL_PSA_CRYPTO) || (CM55_LOCAL_PSA_CRYPTO == 0)
-/*******************************************************************************
- * Function Name: remove_stale_ns_key_file
- ********************************************************************************
- * \brief Removes a device key file left in the non-secure ITS namespace by a
- * build with CM55_LOCAL_PSA_CRYPTO=1.
- *
- * With the PSA core in TF-M, key 0x1 is stored in the TF-M Crypto partition's
- * own ITS namespace and psa_destroy_key() never touches the non-secure entry
- * with the same uid. A leftover entry holds the raw private key of an earlier
- * provisioning and is readable by any non-secure code, so it is deleted here.
- * The TF-M device key is not affected.
- *
- * \return PSA_SUCCESS if a stale file was removed, PSA_ERROR_DOES_NOT_EXIST if
- *         there was none, or another PSA error code on failure.
- *
- ******************************************************************************/
-psa_status_t remove_stale_ns_key_file(void)
-{
-    psa_status_t status = psa_its_remove((psa_storage_uid_t)DEVICE_KEY_ID);
-
-    if (PSA_SUCCESS == status) {
-        printf("[Provisioning] Removed stale non-secure key file from ITS "
-               "(psa_its_remove(uid %lu) -> %ld)\n",
-               (unsigned long)DEVICE_KEY_ID, (long)status);
-        printf("[Provisioning] Deactivate the certificates of earlier provisionings in AWS IoT.\n");
-    } else if (PSA_ERROR_DOES_NOT_EXIST == status) {
-        printf("[Provisioning] No stale non-secure key file in ITS "
-               "(psa_its_remove(uid %lu) -> %ld)\n",
-               (unsigned long)DEVICE_KEY_ID, (long)status);
-    } else {
-        printf("[Provisioning] WARNING: Failed to remove stale non-secure key file "
-               "(psa_its_remove(uid %lu) -> %ld)\n",
-               (unsigned long)DEVICE_KEY_ID, (long)status);
-    }
-    return status;
-}
-#endif /* CM55_LOCAL_PSA_CRYPTO */
 
 /*******************************************************************************
  * Function Name: clear_device_cert_ram

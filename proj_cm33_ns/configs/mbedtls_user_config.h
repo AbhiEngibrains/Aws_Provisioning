@@ -891,32 +891,12 @@
 #define MBEDTLS_SSL_TLS1_3_COMPATIBILITY_MODE
 #endif
 
-#if defined(CM55_LOCAL_PSA_CRYPTO) && (CM55_LOCAL_PSA_CRYPTO == 1)
-/* PSA Crypto core runs on CM55 (MBEDTLS_PSA_CRYPTO_C stays enabled).
- * CY_TFM_PSA_SUPPORTED is kept so that secure-sockets still accepts an opaque
- * PSA key ID as the TLS private key. */
-
-/* Persistent keys are stored through psa_its_*(), served by TF-M ITS */
-#define MBEDTLS_PSA_CRYPTO_STORAGE_C
-
-/* Entropy comes from the TF-M TRNG (mbedtls_psa_external_get_random() in
- * psa_local/psa_local_rng.c). The CRYPTO block is PPC-secured, so CM55 cannot
- * read the TRNG directly. */
-#define MBEDTLS_PSA_CRYPTO_EXTERNAL_RNG
-
-#if defined(CM55_TFM_SE_KEY) && (CM55_TFM_SE_KEY == 1)
-/* Secure element driver interface: keys with location PSA_TFM_SE_LOCATION are
- * kept in TF-M (psa_local/psa_tfm_se_driver.c) */
-#define MBEDTLS_PSA_CRYPTO_SE_C
-#endif /* CM55_TFM_SE_KEY */
-#else
 #ifdef CY_TFM_PSA_SUPPORTED
 #ifndef CY_SECURE_SOCKETS_PKCS_SUPPORT
 #undef MBEDTLS_PSA_CRYPTO_C
 #define MBEDTLS_PSA_CRYPTO_CLIENT
 #endif /* CY_SECURE_SOCKETS_PKCS_SUPPORT */
 #endif /* CY_TFM_PSA_SUPPORTED */
-#endif /* CM55_LOCAL_PSA_CRYPTO */
 
 /**
  * \def MBEDTLS_DEPRECATED_REMOVED
@@ -927,14 +907,8 @@
  * new major version by making sure your code is not using this functionality.
  *
  * Uncomment to get errors on using deprecated functions and features.
- *
- * Not set with CM55_TFM_SE_KEY=1: the TF-M secure element driver uses the
- * secure element interface (MBEDTLS_PSA_CRYPTO_SE_C), which mbedTLS 3.6 marks
- * deprecated.
  */
-#if !defined(CM55_TFM_SE_KEY) || (CM55_TFM_SE_KEY == 0)
 #define MBEDTLS_DEPRECATED_REMOVED
-#endif /* CM55_TFM_SE_KEY */
 
 /**
  * \def Enable MBEDTLS debug logs & set debug level
@@ -996,14 +970,10 @@
 #define MBEDTLS_PLATFORM_MS_TIME_ALT
 
 
-/* Enable MXCRYPTO PSA driver. Not used when the PSA core runs on CM55: the
- * CRYPTO block is PPC-secured and owned by TF-M, so CM55 uses the software
- * implementation. */
-#if !defined(CM55_LOCAL_PSA_CRYPTO) || (CM55_LOCAL_PSA_CRYPTO == 0)
+/* Enable MXCRYPTO PSA driver */
 #define IFX_PSA_MXCRYPTO_PRESENT
 #define PSA_CRYPTO_ACCELERATOR_DRIVER_PRESENT
 #define MBEDTLS_PSA_CRYPTO_DRIVERS
-#endif /* CM55_LOCAL_PSA_CRYPTO */
 #define MBEDTLS_PSA_ASSUME_EXCLUSIVE_BUFFERS
 /**
  * \def MBEDTLS_USE_PSA_CRYPTO

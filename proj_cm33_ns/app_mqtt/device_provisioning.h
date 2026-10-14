@@ -68,35 +68,6 @@
 /* PSA Protected Storage UID for the device certificate */
 #define DEVICE_CERT_PS_UID      ((psa_storage_uid_t)0x100)
 
-/* PSA persistent key ID of the device key pair */
-#define DEVICE_KEY_ID           ((psa_key_id_t)0x1)
-
-/* Set PSA_KEYGEN_DEBUG to 1 (DEFINES+=PSA_KEYGEN_DEBUG=1 in the Makefile) to
- * print debug logs of the PSA key generation process. Only key attributes,
- * status codes and the public key are printed; the private key never leaves
- * TF-M. */
-#ifndef PSA_KEYGEN_DEBUG
-#define PSA_KEYGEN_DEBUG        (0)
-#endif
-
-#if defined(CM55_LOCAL_PSA_CRYPTO) && (CM55_LOCAL_PSA_CRYPTO == 1) && \
-    defined(CM55_TFM_SE_KEY) && (CM55_TFM_SE_KEY == 1)
-#define PSA_ENGINE_NAME         "CM55 PSA core / TF-M SE driver"
-#define PSA_ENGINE_PATH         "CM55 PSA core -> SE driver -> IPC -> TF-M Crypto (key in secure SRAM)"
-#elif defined(CM55_LOCAL_PSA_CRYPTO) && (CM55_LOCAL_PSA_CRYPTO == 1)
-#define PSA_ENGINE_NAME         "CM55 PSA core"
-#define PSA_ENGINE_PATH         "CM55 mbedTLS PSA core (RNG + ITS via TF-M)"
-#else
-#define PSA_ENGINE_NAME         "TF-M"
-#define PSA_ENGINE_PATH         "CM55 -> IPC -> CM33-NS relay -> TF-M Crypto"
-#endif /* CM55_LOCAL_PSA_CRYPTO */
-
-#if PSA_KEYGEN_DEBUG
-#define KEYGEN_DEBUG_PRINT(...) printf("[PSA-KEYGEN] " __VA_ARGS__)
-#else
-#define KEYGEN_DEBUG_PRINT(...) do { } while (0)
-#endif /* PSA_KEYGEN_DEBUG */
-
 /*******************************************************************************
 * Extern Variables (defined in device_provisioning.c)
 ********************************************************************************/
@@ -123,9 +94,6 @@ psa_status_t import_claim_key(psa_key_id_t *key_handle);
 psa_status_t store_device_cert_secure(void);
 psa_status_t load_device_cert_secure(void);
 psa_status_t delete_device_cert_secure(void);
-#if !defined(CM55_LOCAL_PSA_CRYPTO) || (CM55_LOCAL_PSA_CRYPTO == 0)
-psa_status_t remove_stale_ns_key_file(void);
-#endif
 
 /*******************************************************************************
  * Function Name: clear_device_cert_ram

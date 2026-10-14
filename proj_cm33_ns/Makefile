@@ -53,7 +53,7 @@ VERBOSE=
 # ... then code in directories named COMPONENT_foo and COMPONENT_bar will be
 # added to the build
 #
-COMPONENTS+=FREERTOS
+COMPONENTS+=FREERTOS LWIP MBEDTLS WCM SECURE_SOCKETS
 
 # Like COMPONENTS, but disable optional code that was enabled by default.
 DISABLE_COMPONENTS= 
@@ -71,10 +71,30 @@ SOURCES+=
 # directories (without a leading -I).
 INCLUDES+=
 
+# Custom configuration of mbedtls library.
+MBEDTLSFLAGS = MBEDTLS_USER_CONFIG_FILE='"configs/mbedtls_user_config.h"'
+
 # Add additional defines to the build process (without a leading -D).
-# CM33 NS only boots CM55 and relays its PSA requests to TF-M. Wi-Fi, MQTT
-# and provisioning run on CM55.
-DEFINES+=CY_RTOS_AWARE
+DEFINES+=$(MBEDTLSFLAGS) CYBSP_WIFI_CAPABLE CY_RETARGET_IO_CONVERT_LF_TO_CRLF CY_RTOS_AWARE 
+
+#Add PSA support define for connectivity MW to use PSA APIs.
+DEFINES+=CY_TFM_PSA_SUPPORTED
+
+# Default configuration of mbedtls library.
+DEFINES+=MBEDTLS_CONFIG_FILE='"mbedtls/mbedtls_config.h"'
+# PSA configuration of mbedtls library.
+DEFINES+=MBEDTLS_PSA_CRYPTO_CONFIG_FILE='"configs/ifx_psa_crypto_config.h"'
+
+DEFINES+=MBEDTLS_USER_CONFIG_FILE='"configs/mbedtls_user_config.h"'
+
+DEFINES+=IFX_PSA_MXCRYPTO_USER_CONFIG_FILE='"configs/ifx_psa_mxcrypto_config.h"'
+
+ifeq ($(TOOLCHAIN),LLVM_ARM)
+DEFINES+=CY_MQTT_EVENT_THREAD_STACK_SIZE=10*1024
+endif
+
+# Comment below line for one-time provisioning/re-use the device certificate from secure storage.
+DEFINES+=FORCE_PROVISIONINING
 
 # Select softfp or hardfp floating point. Default is softfp.
 VFP_SELECT+=
@@ -134,5 +154,7 @@ CY_GETLIBS_SHARED_PATH=../..
 # Directory name of the shared repo location.
 #
 CY_GETLIBS_SHARED_NAME=mtb_shared
+
+CY_IGNORE+=$(CY_GETLIBS_SHARED_PATH)/$(CY_GETLIBS_SHARED_NAME)/aws-iot-device-sdk-embedded-C/202103.00/libraries/standard/coreHTTP/
 
 include $(CY_TOOLS_DIR)/make/start.mk

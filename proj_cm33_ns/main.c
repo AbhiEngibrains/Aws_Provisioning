@@ -38,6 +38,8 @@
 
 /* Header file includes */
 #include "cybsp.h"
+#include "retarget_io_init.h"
+#include "mqtt_task.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cyabs_rtos.h"
@@ -78,30 +80,6 @@ static mtb_hal_rtc_t rtc_obj;
 /*****************************************************************************
  * Function Definitions
  *****************************************************************************/
-/*******************************************************************************
-* Function Name: handle_app_error
-********************************************************************************
-* Summary:
-* User defined error handling function
-*
-* Parameters:
-*  void
-*
-* Return:
-*  void
-*
-*******************************************************************************/
-static void handle_app_error(void)
-{
-    /* Disable all interrupts. */
-    __disable_irq();
-
-    CY_ASSERT(0);
-
-    /* Infinite loop */
-    while(true);
-}
-
 /*******************************************************************************
 * Function Name: lptimer_interrupt_handler
 ********************************************************************************
@@ -224,10 +202,8 @@ static void setup_clib_support(void)
  * Function Name: main
  ******************************************************************************
  * Summary:
- *  System entrance point. This function initializes RTC, enables CM55,
- *  initializes the TF-M interface and then starts the RTOS scheduler. The
- *  SRF relay threads created by cybsp_init() forward PSA requests from CM55
- *  to TF-M. The debug UART is owned by CM55.
+ *  System entrance point. This function initializes retarget IO, RTC, sets up 
+ *  the MQTT client task, enables CM55 and then starts the RTOS scheduler.
  *
  * Parameters:
  *  void
@@ -251,8 +227,19 @@ int main(void)
     /* Setup the LPTimer instance for CM33 CPU. */
     setup_tickless_idle_timer();
 
+    /* Initialize retarget-io middleware */
+    init_retarget_io();
+
     /* Setup CLIB support library. */
     setup_clib_support();
+
+    /* \x1b[2J\x1b[;H - ANSI ESC sequence to clear screen. */
+    printf("\x1b[2J\x1b[;H");
+    printf("===============================================================\n");
+
+    printf("PSOC Edge MCU: AWS Device Provisioning\n");
+
+    printf("===============================================================\n\n");
 
     /* Enable CM55. CY_CORTEX_M55_APPL_ADDR must be updated if CM55 memory layout is changed. */
     Cy_SysEnableCM55(MXCM55, CM55_APP_BOOT_ADDR, CM55_BOOT_WAIT_TIME_US);
@@ -260,19 +247,39 @@ int main(void)
     /* Enable global interrupts. */
     __enable_irq();
 
-    // /* Initialize TF-M interface */
-    // result = tfm_ns_interface_init();
-    // if(result != OS_WRAPPER_SUCCESS)
-    // {
-    //     CY_ASSERT(0);
-    // }
+    /* Initialize TF-M interface */
+    result = tfm_ns_interface_init();
+    if(result != OS_WRAPPER_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
 
-    /* Start the FreeRTOS scheduler. Runs the SRF relay threads that serve
-     * PSA requests from CM55. */
-    vTaskStartScheduler();
+    /* Initialize PSA Crypto  */
+    {
+        psa_status_t psa_status = psa_crypto_init();
+        if (psa_status != PSA_SUCCESS)
+        {
+            printf("Failed to initialize PSA crypto: %d\n", (int)psa_status);
+            CY_ASSERT(0);
+        }
+    }
 
-    /* Should never get here. */
-    handle_app_error();
+    /* Create the MQTT Client task. */
+    result = xTaskCreate(mqtt_client_task, "MQTT Client task", MQTT_CLIENT_TASK_STACK_SIZE,
+                NULL, MQTT_CLIENT_TASK_PRIORITY, NULL);
+
+    if( pdPASS == result )
+    {
+        /* Start the FreeRTOS scheduler. */
+        vTaskStartScheduler();
+        
+        /* Should never get here. */
+        handle_app_error();
+    }
+    else
+    {
+        handle_app_error();
+    }
 }
 
 /* [] END OF FILE */
